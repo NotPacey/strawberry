@@ -1,0 +1,117 @@
+name: Build Windows (personal)
+
+# Builds a 64-bit Windows release of Strawberry using upstream's own
+# MXE cross-compile container, then uploads the installer and a portable
+# folder as downloadable artifacts on the workflow run page.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/windows-build.yaml'
+
+jobs:
+  build-windows:
+    name: Build Windows x64 (release)
+    runs-on: ubuntu-latest
+    container:
+      image: jonaski/strawberry-mxe-x86_64-release
+    env:
+      MXE: /strawberry-mxe/usr/x86_64-w64-mingw32.shared
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Add safe git directory
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
+      - name: Add MXE directory to PATH
+        run: echo "/strawberry-mxe/usr/bin" >> $GITHUB_PATH
+
+      - name: Run CMake
+        env:
+          PKG_CONFIG_PATH: /strawberry-mxe/usr/x86_64-w64-mingw32.shared/lib/pkgconfig
+        run: >
+          cmake -S . -B build
+          -DCMAKE_SYSTEM_NAME="Windows"
+          -DCMAKE_BUILD_TYPE="Release"
+          -DCMAKE_FIND_ROOT_PATH=${MXE}
+          -DCMAKE_C_COMPILER="x86_64-w64-mingw32.shared-gcc"
+          -DCMAKE_CXX_COMPILER="x86_64-w64-mingw32.shared-g++"
+          -DCMAKE_RC_COMPILER="x86_64-w64-mingw32.shared-windres"
+          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY
+          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+          -DCMAKE_PREFIX_PATH="${MXE}/qt6"
+          -DENABLE_WIN32_CONSOLE=OFF
+          -DENABLE_GIO=OFF
+          -DENABLE_MTP=OFF
+          -DENABLE_GPOD=OFF
+          -DENABLE_SPOTIFY=OFF
+          -DCREATE_SOURCE_API_CREDENTIALS=OFF
+          -DAPI_CREDENTIALS_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel $(nproc)
+
+      - name: Create directories
+        working-directory: build
+        run: mkdir -p gio-modules platforms sqldrivers tls imageformats styles gstreamer-plugins nsisplugins
+
+      - name: Copy plugins and runtime files
+        working-directory: build
+        shell: bash
+        run: |
+          set -e
+          cp ${MXE}/lib/gio/modules/{libgiognutls.dll,libgioopenssl.dll} gio-modules/
+          cp ${MXE}/qt6/plugins/platforms/qwindows.dll platforms/
+          cp ${MXE}/qt6/plugins/styles/qmodernwindowsstyle.dll styles/
+          cp ${MXE}/qt6/plugins/tls/{qschannelbackend.dll,qopensslbackend.dll} tls/
+          cp ${MXE}/qt6/plugins/sqldrivers/qsqlite.dll sqldrivers/
+          cp ${MXE}/qt6/plugins/imageformats/{qgif.dll,qico.dll,qjpeg.dll,qtiff.dll,qjp2.dll,qwebp.dll} imageformats/
+          cp ${MXE}/bin/gstreamer-1.0/*.dll gstreamer-plugins/
+          cp ${MXE}/bin/{sqlite3.exe,gst-launch-1.0.exe,gst-play-1.0.exe,gst-discoverer-1.0.exe,libsoup-3.0-0.dll,libnghttp2.dll} .
+
+      - name: Copy DLL dependencies
+        working-directory: build
+        run: >
+          /strawberry-mxe/tools/copydlldeps.sh
+          -c -d .
+          -F . -F ./platforms -F ./styles -F ./imageformats -F ./tls -F ./sqldrivers -F ./gstreamer-plugins
+          -R ${MXE}
+
+      - name: Strip binaries
+        working-directory: build
+        run: find . -type f \( -iname \*.dll -o -iname \*.exe \) -exec /strawberry-mxe/usr/bin/x86_64-w64-mingw32.shared-strip {} \;
+
+      - name: Build installer
+        working-directory: build
+        run: |
+          cp ${GITHUB_WORKSPACE}/dist/windows/*.nsh ${GITHUB_WORKSPACE}/dist/windows/*.ico .
+          cp ${GITHUB_WORKSPACE}/COPYING .
+          makensis strawberry.nsi
+
+      - name: Collect portable folder
+        working-directory: build
+        shell: bash
+        run: |
+          mkdir -p ../portable/strawberry
+          cp *.exe *.dll *.ico COPYING ../portable/strawberry/ 2>/dev/null || true
+          rm -f ../portable/strawberry/StrawberrySetup*.exe
+          cp -r gio-modules platforms sqldrivers tls imageformats styles gstreamer-plugins ../portable/strawberry/
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: strawberry-windows-installer
+          path: build/StrawberrySetup*.exe
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: strawberry-windows-portable
+          path: portable/
